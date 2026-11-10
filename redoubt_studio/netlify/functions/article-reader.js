@@ -358,7 +358,12 @@ exports.handler = async event => {
       })
     };
 
-  } catch (e) {
+  } catch (e) { console.error('ARTICLE READER ERROR:', {
+  message: e.message,
+  cause: e.cause?.message,
+  code: e.cause?.code,
+  stack: e.stack
+});
     const error = [
       'TimeoutError',
       'AbortError'
