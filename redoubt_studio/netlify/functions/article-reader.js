@@ -226,20 +226,26 @@ exports.handler = async event => {
         current.hostname
       );
 
-      const agent = new Agent({
-        connect: {
-          lookup(_hostname, _options, callback) {
-            // Use a previously vetted public address.
-            const selected = addresses[0];
+      
+const agent = new Agent({
+  connect: {
+    lookup(_hostname, options, callback) {
+      const selected = addresses.find(
+        a => a.family === options?.family
+      ) || addresses[0];
 
-            callback(
-              null,
-              selected.address,
-              selected.family
-            );
-          }
-        }
-      });
+      if (options?.all) {
+        callback(null, [{
+          address: selected.address,
+          family: selected.family
+        }]);
+      } else {
+        callback(null, selected.address, selected.family);
+      }
+    }
+  }
+});
+
 
       try {
         const response = await undiciFetch(
