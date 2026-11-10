@@ -4,82 +4,91 @@ const { JSDOM } = require('jsdom');
 const dns = require('node:dns').promises;
 const net = require('node:net');
 const { URL } = require('node:url');
+const { Agent, fetch: undiciFetch } = require('undici');
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const TIMEOUT_MS = 12000;
 const MAX_REDIRECTS = 3;
 
-function isPublicIP(address) {
-  const family = net.isIP(address);
-  if (family === 4) {
-    const [a, b, c] = address.split('.').map(Number);
-    if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-    if (a === 169 && b === 254) return false;
-    if (a === 172 && b >= 16 && b <= 31) return false;
-    if (a === 192 && b === 168) return false;
-    if (a === 100 && b >= 64 && b <= 127) return false;
-    if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
-    if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false;
-    if (a === 203 && b === 0 && c === 113) return false;
-    if (a === 192 && b === 88 && c === 99) return false;
-    if (a === 192 && b === 0 && c === 0) return false;
-    return true;
+function publicIP(ip) {
+  const version = net.isIP(ip);
+
+  if (version === 4) {
+    const [a, b, c] = ip.split('.').map(Number);
+
+    return !(
+      a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 192 && b === 0) ||
+      (a === 198 && (b === 18 || b === 19 ||
+        (b === 51 && c === 100))) ||
+      (a === 203 && b === 0 && c === 113) ||
+      (a === 192 && b === 88 && c === 99)
+    );
   }
-  if (family === 6) {
-    const s = address.toLowerCase();
-    if (s === '::' || s === '::1') return false;
-    if (s.startsWith('::ffff:')) {
-      const tail = s.slice(7);
-      if (net.isIP(tail) === 4) return isPublicIP(tail);
+
+  if (version === 6) {
+    const normalized = ip.toLowerCase();
+
+    if (normalized.startsWith('::ffff:')) {
+      return publicIP(normalized.slice(7));
+    }
+
+    if (normalized === '::' || normalized === '::1') {
       return false;
     }
-    const first = parseInt(s.split(':')[0] || '0', 16);
-    if ((first & 0xfe00) === 0xfc00) return false;
-    if ((first & 0xffc0) === 0xfe80) return false;
-    if ((first & 0xff00) === 0xff00) return false;
-    if (s.startsWith('2001:db8:')) return false;
-    if (!s.startsWith('2') && !s.startsWith('3')) return false;
-    return true;
+
+    const first = parseInt(
+      normalized.split(':')[0] || '0', 16
+    );
+
+    return (
+      (first & 0xfe00) !== 0xfc00 &&
+      (first & 0xffc0) !== 0xfe80 &&
+      (first & 0xff00) !== 0xff00 &&
+      !normalized.startsWith('2001:db8:') &&
+      (normalized.startsWith('2') ||
+       normalized.startsWith('3'))
+    );
   }
+
   return false;
 }
 
-function validateUrl(input) {
+function validateURL(input) {
   const u = new URL(input);
+  const host = u.hostname.toLowerCase().replace(/\.$/, '');
+
   if (
     !['http:', 'https:'].includes(u.protocol) ||
-    u.username || u.password ||
-    !['', '80', '443'].includes(u.port)
-  ) {
-    throw new Error('Unsupported article URL');
-  }
-  const host = u.hostname.toLowerCase().replace(/\.$/, '');
-  if (
-    !host || host === 'localhost' ||
+    u.username ||
+    u.password ||
+    !['', '80', '443'].includes(u.port) ||
+    net.isIP(host) ||
+    host === 'localhost' ||
     ['.localhost', '.local', '.internal', '.test']
       .some(s => host.endsWith(s))
   ) {
-    throw new Error('Unsupported article host');
+    throw new Error('Unsupported article URL');
   }
-  if (net.isIP(host)) {
-    throw new Error('Direct IP addresses are not supported');
-  }
+
   return u;
 }
 
-async function resolvePublicAddresses(hostname) {
-  const addresses = await dns.lookup(hostname, {
-    all: true,
-    verbatim: true
-  });
-  const allowed = addresses.filter(a => isPublicIP(a.address));
-  if (!addresses.length || !allowed.length) {
-    throw new Error(`No public IP address available for ${hostname}`);
+async function addressesFor(host) {
+  const addresses = await dns.lookup(host, { all: true });
+
+  if (
+    !addresses.length ||
+    addresses.some(a => !publicIP(a.address))
+  ) {
+    throw new Error('Private addresses are not allowed');
   }
-  if (allowed.length !== addresses.length) {
-    throw new Error(`Host ${hostname} has a restricted DNS address`);
-  }
-  return allowed;
+
+  return addresses;
 }
 
 function sanitize(root, base) {
@@ -90,11 +99,12 @@ function sanitize(root, base) {
 
   for (const el of [...root.querySelectorAll('*')]) {
     for (const attr of [...el.attributes]) {
-      const name = attr.name.toLowerCase();
       if (
-        name.startsWith('on') ||
-        ['style','srcset','srcdoc','formaction','poster','id','class']
-          .includes(name)
+        attr.name.toLowerCase().startsWith('on') ||
+        [
+          'style', 'srcset', 'srcdoc', 'formaction',
+          'poster', 'id', 'class'
+        ].includes(attr.name.toLowerCase())
       ) {
         el.removeAttribute(attr.name);
       }
@@ -102,11 +112,14 @@ function sanitize(root, base) {
 
     if (el.tagName === 'IMG') {
       try {
-        const url = new URL(el.getAttribute('src') || '', base);
-        if (!['http:', 'https:'].includes(url.protocol)) {
+        const u = new URL(
+          el.getAttribute('src') || '', base
+        );
+
+        if (!['http:', 'https:'].includes(u.protocol)) {
           el.remove();
         } else {
-          el.setAttribute('src', url.href);
+          el.setAttribute('src', u.href);
           el.setAttribute('loading', 'lazy');
           el.setAttribute('referrerpolicy', 'no-referrer');
         }
@@ -117,11 +130,14 @@ function sanitize(root, base) {
 
     if (el.tagName === 'A') {
       try {
-        const url = new URL(el.getAttribute('href') || '', base);
-        if (!['http:', 'https:'].includes(url.protocol)) {
+        const u = new URL(
+          el.getAttribute('href') || '', base
+        );
+
+        if (!['http:', 'https:'].includes(u.protocol)) {
           el.removeAttribute('href');
         } else {
-          el.setAttribute('href', url.href);
+          el.setAttribute('href', u.href);
           el.setAttribute('target', '_blank');
           el.setAttribute('rel', 'noopener noreferrer');
         }
@@ -132,37 +148,46 @@ function sanitize(root, base) {
       el.removeAttribute('href');
     }
 
-    if (el.tagName !== 'IMG' && el.hasAttribute('src')) {
+    if (
+      el.tagName !== 'IMG' &&
+      el.hasAttribute('src')
+    ) {
       el.removeAttribute('src');
     }
   }
+
   return root.innerHTML;
 }
 
-async function readLimited(response) {
-  const declared = Number(
-    response.headers.get('content-length') || 0
-  );
-  if (declared > MAX_BYTES) {
+async function limitedText(response) {
+  if (
+    Number(response.headers.get('content-length') || 0)
+      > MAX_BYTES
+  ) {
     throw new Error('Article is too large');
   }
+
   if (!response.body) {
     throw new Error('Empty publisher response');
   }
 
   const reader = response.body.getReader();
   const chunks = [];
-  let total = 0;
+  let size = 0;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
+
       if (done) break;
-      total += value.byteLength;
-      if (total > MAX_BYTES) {
+
+      size += value.byteLength;
+
+      if (size > MAX_BYTES) {
         await reader.cancel();
         throw new Error('Article is too large');
       }
+
       chunks.push(Buffer.from(value));
     }
   } finally {
@@ -174,95 +199,143 @@ async function readLimited(response) {
 
 exports.handler = async event => {
   if (event.httpMethod !== 'GET') {
-    return { statusCode: 405, body: 'Method not allowed' };
+    return {
+      statusCode: 405,
+      body: 'Method not allowed'
+    };
   }
 
   try {
     const raw = event.queryStringParameters?.url;
+
     if (!raw || raw.length > 3000) {
       throw new Error('Missing or oversized URL');
     }
 
-    let current = validateUrl(raw);
-    const signal = AbortSignal.timeout(TIMEOUT_MS);
+    let current = validateURL(raw);
     let html;
 
-    for (let i = 0; i <= MAX_REDIRECTS; i++) {
-      const { Agent, fetch: undiciFetch } = require('undici');
-      const addresses = await resolvePublicAddresses(current.hostname);
+    const signal = AbortSignal.timeout(TIMEOUT_MS);
+
+    for (
+      let redirect = 0;
+      redirect <= MAX_REDIRECTS;
+      redirect++
+    ) {
+      const addresses = await addressesFor(
+        current.hostname
+      );
 
       const agent = new Agent({
         connect: {
-          lookup(host, options, callback) {
-            const match = addresses.find(
-              a => a.family === options.family
-            ) || addresses[0];
-            callback(null, match.address, match.family);
+          lookup(_hostname, _options, callback) {
+            // Use a previously vetted public address.
+            const selected = addresses[0];
+
+            callback(
+              null,
+              selected.address,
+              selected.family
+            );
           }
         }
       });
 
       try {
-        const response = await undiciFetch(current.href, {
-          dispatcher: agent,
-          redirect: 'manual',
-          signal,
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (compatible; RedoubtReader/1.0)',
-            'Accept': 'text/html,application/xhtml+xml',
-            'Accept-Language': 'en-US,en;q=0.8'
+        const response = await undiciFetch(
+          current.href,
+          {
+            dispatcher: agent,
+            redirect: 'manual',
+            signal,
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (compatible; RedoubtReader/1.0)',
+              'Accept':
+                'text/html,application/xhtml+xml',
+              'Accept-Language':
+                'en-US,en;q=0.8'
+            }
           }
-        });
+        );
 
-        if ([301,302,303,307,308].includes(response.status)) {
-          if (i === MAX_REDIRECTS) {
+        if (
+          [301, 302, 303, 307, 308]
+            .includes(response.status)
+        ) {
+          if (redirect === MAX_REDIRECTS) {
             throw new Error('Too many redirects');
           }
-          const location = response.headers.get('location');
+
+          const location =
+            response.headers.get('location');
+
           if (!location) {
-            throw new Error('Invalid publisher redirect');
+            throw new Error(
+              'Invalid publisher redirect'
+            );
           }
-          current = validateUrl(new URL(location, current).href);
+
+          current = validateURL(
+            new URL(location, current).href
+          );
+
           await response.body?.cancel();
           continue;
         }
 
         if (!response.ok) {
           throw new Error(
-            'Publisher returned HTTP ' + response.status
+            'Publisher returned HTTP ' +
+            response.status
           );
         }
 
-        if (!/^text\/html\b/i.test(
-          response.headers.get('content-type') || ''
-        )) {
-          throw new Error('Source is not an HTML article');
+        if (
+          !/^text\/html\b/i.test(
+            response.headers.get('content-type') || ''
+          )
+        ) {
+          throw new Error(
+            'Source is not an HTML article'
+          );
         }
 
-        html = await readLimited(response);
+        html = await limitedText(response);
         break;
+
       } finally {
         await agent.close();
       }
     }
 
-    if (!html) throw new Error('No article HTML received');
+    if (!html) {
+      throw new Error('No article HTML received');
+    }
 
-    const dom = new JSDOM(html, { url: current.href });
+    const dom = new JSDOM(html, {
+      url: current.href
+    });
+
     const article = new Readability(
       dom.window.document,
       { charThreshold: 200 }
     ).parse();
 
-    if (!article?.content || !article.textContent?.trim()) {
-      throw new Error('No readable article text found');
+    if (
+      !article?.content ||
+      !article.textContent?.trim()
+    ) {
+      throw new Error(
+        'No readable article text found'
+      );
     }
 
     const clean = new JSDOM(
       `<main>${article.content}</main>`,
       { url: current.href }
     );
+
     const content = sanitize(
       clean.window.document.querySelector('main'),
       current.href
@@ -271,8 +344,10 @@ exports.handler = async event => {
     return {
       statusCode: 200,
       headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'private, max-age=120'
+        'Content-Type':
+          'application/json; charset=utf-8',
+        'Cache-Control':
+          'private, max-age=120'
       },
       body: JSON.stringify({
         title: article.title,
@@ -282,18 +357,26 @@ exports.handler = async event => {
         content
       })
     };
+
   } catch (e) {
-    const message = ['TimeoutError','AbortError'].includes(e.name)
+    const error = [
+      'TimeoutError',
+      'AbortError'
+    ].includes(e.name)
       ? 'Article request timed out'
-      : (e.message || 'Article could not be loaded');
+      : (
+          e.message ||
+          'Article could not be loaded'
+        );
 
     return {
       statusCode: 422,
       headers: {
-        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Type':
+          'application/json; charset=utf-8',
         'Cache-Control': 'no-store'
       },
-      body: JSON.stringify({ error: message })
+      body: JSON.stringify({ error })
     };
   }
 };
