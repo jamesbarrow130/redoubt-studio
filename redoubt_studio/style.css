@@ -20,3 +20,13 @@
 
 /* v7: cloud sync */
 .cloudBar{padding:10px 24px;background:#101b2b;border-bottom:1px solid #2b3a52;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}.cloudStatus,.cloudActions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.cloudStatus{font-size:12px;color:#c3d1e4}.cloudActions button{padding:7px 11px;font-size:12px}.cloudDot{width:9px;height:9px;border-radius:50%;background:#94a3b8;display:inline-block}.cloudDot.ok{background:#4ade80}.cloudDot.busy{background:#facc15}.cloudDot.bad{background:#fb7185}dialog{background:#121a28;color:#f1f5ff;border:1px solid #50617d;border-radius:12px;max-width:min(92vw,560px);width:100%;box-shadow:0 25px 80px #000b}dialog::backdrop{background:#000a}.cloudDialogForm{display:grid;gap:12px;padding:12px}.cloudDialogForm label{display:grid;gap:6px;font-size:12px;color:#cbd5e1}.cloudDialogForm h2{font-size:20px}.cloudDialogForm .row{justify-content:flex-end}.cloudDialogForm .row>*:first-child{flex:initial}#cloudSnapshots{max-height:55vh;overflow:auto;display:grid;gap:8px}.snapshotItem{padding:10px;border:1px solid #3b4c65;border-radius:8px;display:flex;align-items:center;justify-content:space-between;gap:10px}.snapshotItem small{color:#9fb0c8}#cloudDialogMessage{overflow-wrap:anywhere}
+
+/* Private show notes — control room only */
+.privateNotes{margin-top:22px;padding:17px;background:#162235;border:1px solid #344765;border-radius:10px}
+.privateNotesHead{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.privateNotesHead h3{margin:0;color:#e8edf5;font-size:15px}
+.privateNotesHead span{color:#93a9c6;font-size:12px}
+.privateNotesClip{color:#b9ccec;font-size:13px;font-weight:600;margin:13px 0 10px;overflow-wrap:anywhere}
+.privateNotes textarea{display:block;width:100%;min-height:150px;resize:vertical;line-height:1.55;background:#101a2a;border:1px solid #415371;color:#f3f6ff}
+.privateNotes textarea:disabled{opacity:.55}
+.privateNotesStatus{font-size:12px;color:#91a6c3;margin-top:9px}
